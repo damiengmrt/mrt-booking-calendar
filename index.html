@@ -11426,7 +11426,14 @@ function toggleBookingWorkflow(b,key){
   if(next && key!=='collected' && isCollectedBooking(b))setActionActive(b,'collected',false);
   b.updatedAt=new Date().toISOString();
   addBookingChangeAudit(b,'Workflow updated',before,b,bookingActionLabel(action)+' '+(next?'selected':'cleared'));
+
+  // Persist direct card workflow-chip changes immediately.
+  // Without this, the chip updates only in the current browser memory and reverts after refresh.
+  try{localStorage.setItem(STORAGE_KEY,JSON.stringify(state));}catch(e){}
+  queueBookingUpsert(b,true);
+
   render();
+  toast('Workflow status saved.');
 }
 function ensureBookingRegoStock(b){
   if((b.regoStock||'').trim())return true;
