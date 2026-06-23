@@ -3,11 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>MRTBC Booking Calendar v2.0</title>
-<link rel="icon" type="image/png" href="./MRTBC2.png?v=1">
-<link rel="shortcut icon" type="image/png" href="./MRTBC2.png?v=1">
-<link rel="apple-touch-icon" href="./MRTBC2.png?v=2">
-<meta name="theme-color" content="#080d18">
+<title>MRTBC Booking Calendar Prototype</title>
 <!-- MRTBC update: Supabase saves now queue immediately, persist pending saves, and use page-close keepalive. -->
 <!-- MRTBC update: Supabase fast save + safe merge protection for stale realtime overwrites. -->
 <!-- MRTBC update: Admin branch capacity auto-save + manual vehicle make input. -->
@@ -600,6 +596,34 @@ button,input,select,textarea{
   gap:8px;
   justify-content:flex-end;
   background:#10131c;
+}
+
+.modal-foot .jorb-btn{
+  margin-right:auto!important;
+  border-color:#111827!important;
+  color:#ff2b2b!important;
+  background:linear-gradient(180deg,#ffffff,#eef1f7)!important;
+  text-shadow:none!important;
+}
+
+.modal-foot .jorb-btn.on{
+  background:linear-gradient(180deg,#ffefef,#ffd0d0)!important;
+  border-color:#000!important;
+  color:#d00000!important;
+  box-shadow:0 0 0 1px rgba(0,0,0,.65),0 0 14px rgba(255,0,0,.22)!important;
+}
+
+.booking.jorb-flag .booking-order-link,
+.booking.jorb-flag .booking-order{
+  display:inline-block!important;
+  color:#ffffff!important;
+  border:none!important;
+  border-radius:4px!important;
+  padding:1px 5px!important;
+  background:#d00000!important;
+  text-shadow:none!important;
+  -webkit-text-stroke:0!important;
+  text-decoration:none!important;
 }
 
 .form-grid{
@@ -3238,13 +3262,6 @@ select option:hover,
   font-weight:950!important;
 }
 
-/* Change | colour */
-.booking .booking-meta .booking-meta-sep{
-  color:#000000!important;
-  font-weight:900!important;
-  font-size:12px!important;
-  padding:0px!important;
-}
 
 /* Part Day time dropdown - unavailable 2-hour-gap times */
 #bPartTime option.part-time-unavailable,
@@ -8436,6 +8453,7 @@ body.theme-light .summary-branch-overview-panel .summary-overview-branch-shell .
       </div>
     </div>
     <div class="modal-foot">
+      <button type="button" class="btn jorb-btn" id="jorbBookingBtn" title="Toggle JorB flag">JorB</button>
       <button class="btn" id="generateEmailBtn">Generate Email</button>
       <button class="btn" id="auditBookingBtn">Audit</button>
       <button class="btn danger" id="deleteBookingBtn">Delete</button>
@@ -8658,8 +8676,14 @@ const SUPABASE_ANON_KEY = 'sb_publishable_mq9GPa9tTwSmSz12SkpdHA_xlXdEK0X';
 const SUPABASE_TABLE = 'mrtbc_live_state';
 const SUPABASE_BOOKINGS_TABLE = 'mrtbc_bookings';
 const SUPABASE_ROW_ID = 'main';
-const SUPABASE_STATE_VERSION = 35;
-const SUPABASE_BOOKINGS_LIMIT = 50000;
+const SUPABASE_STATE_VERSION = 37;
+// Egress control: do not load the whole booking table on every page open.
+// The live calendar loads the active branch from 30 days before the visible week
+// to 90 days after the visible week. Older bookings are fetched only by deep search.
+const SUPABASE_BOOKING_LOAD_DAYS_BEFORE = 30;
+const SUPABASE_BOOKING_LOAD_DAYS_AFTER = 90;
+const SUPABASE_BOOKING_WINDOW_LIMIT = 5000;
+const SUPABASE_ENABLE_LEGACY_BOOKING_MIGRATION = false;
 const SUPABASE_SYNC_ENABLED = true;
 let supabaseClient = null;
 let supabaseChannel = null;
@@ -8677,16 +8701,19 @@ let supabaseBookingFlushTimer = null;
 let supabaseBookingFlushInFlight = false;
 let supabaseHydratingBookingRows = false;
 let supabaseBookingsTableAvailable = true;
+let supabaseLoadedBookingWindows = {};
+let supabaseBookingLoadTimer = null;
+let supabaseBookingLoadInFlightKey = '';
 
 const DEFAULT_ROLE_DEFS = {
   viewer:{label:'Viewer',pin:'',actions:['view','search','print','jumpDate']},
   workshop:{label:'Workshop',pin:'1234',actions:['view','search','print','jumpDate','updateWorkflow']},
   manager:{label:'Manager',pin:'5678',actions:['view','search','print','jumpDate','createBooking','editBooking','deleteBooking','duplicateBooking','updateWorkflow','viewAudit']},
-  admin:{label:'Admin',pin:'99996',actions:['view','search','print','jumpDate','createBooking','editBooking','deleteBooking','duplicateBooking','confirmBooking','updateWorkflow','viewAudit','settings','dataControls','clearData']}
+  admin:{label:'Admin',pin:'99996',actions:['view','search','print','jumpDate','createBooking','editBooking','deleteBooking','duplicateBooking','confirmBooking','jorb','updateWorkflow','viewAudit','settings','dataControls','clearData']}
 };
 const DEFAULT_USER_ACCOUNTS = [];
-const AVAILABLE_ACTIONS = ['view','search','print','jumpDate','createBooking','editBooking','deleteBooking','duplicateBooking','confirmBooking','updateWorkflow','viewAudit','settings','dataControls','clearData'];
-const ACTION_LABELS = {view:'View calendar',search:'Search bookings',print:'Print week',jumpDate:'Jump dates',createBooking:'Create bookings',editBooking:'Edit bookings',deleteBooking:'Delete bookings',duplicateBooking:'Duplicate bookings',confirmBooking:'Confirm bookings',updateWorkflow:'Update workflow',viewAudit:'View audit log',settings:'Admin portal',dataControls:'Import / Export / Demo data',clearData:'Clear all data'};
+const AVAILABLE_ACTIONS = ['view','search','print','jumpDate','createBooking','editBooking','deleteBooking','duplicateBooking','confirmBooking','jorb','updateWorkflow','viewAudit','settings','dataControls','clearData'];
+const ACTION_LABELS = {view:'View calendar',search:'Search bookings',print:'Print week',jumpDate:'Jump dates',createBooking:'Create bookings',editBooking:'Edit bookings',deleteBooking:'Delete bookings',duplicateBooking:'Duplicate bookings',confirmBooking:'Confirm bookings',jorb:'JorB',updateWorkflow:'Update workflow',viewAudit:'View audit log',settings:'Admin portal',dataControls:'Import / Export / Demo data',clearData:'Clear all data'};
 const BRANCH_NAMES = ['Brisbane','Melbourne','Perth','Sydney'];
 const BOOKING_TYPES = ['Part Day','Full Day','2 Day Fit','1 Week Fit'];
 const DEFAULT_VEHICLE_MAKES = ['Ford','Toyota','Mazda','Isuzu','VW','Nissan','Holden','Chev','Dodge','Mitsubishi','GWM','BYD','LDV','Ssangyong','Other',];
@@ -8800,6 +8827,7 @@ let auth = {mode:'role',role:'workshop',userId:'',userName:''};
 let pendingInviteToken = '';
 let inviteSetupOpened = false;
 let editingId = null;
+let modalJorbFlag = false;
 let prefill = null;
 let duplicateSourceBooking = null;
 let duplicateTargetDirty = false;
@@ -8971,7 +8999,7 @@ function normaliseBookingRecord(b){
   const cabSize=cleanVehiclePart(b.cabSize||'');
   const cabSizeOther=cleanVehiclePart(b.cabSizeOther||'');
   const vehicle=cleanVehiclePart(b.vehicle)||composeVehicleDetailsFromParts(vehicleMake,vehicleModel,vehicleYear,cabSize==='Other'?cabSizeOther:cabSize);
-  return {...b,status:normaliseStatusName(b.status||'Booked'),confirmed:!!b.confirmed,confirmedAt:b.confirmedAt||'',confirmedBy:b.confirmedBy||'',canopyPkg:b.canopyPkg||'',vehicleMake,vehicleModel,vehicleYear,cabSize,cabSizeOther,vehicle,mountType:cleanVehiclePart(b.mountType||''),packageType:cleanVehiclePart(b.packageType||''),companionOption:cleanVehiclePart(b.companionOption||''),trayCanopyOption:cleanVehiclePart(b.trayCanopyOption||''),recurrenceGroupId:b.recurrenceGroupId||'',recurrenceParentId:b.recurrenceParentId||'',recurrenceRule:(b.recurrenceRule&&typeof b.recurrenceRule==='object')?b.recurrenceRule:null,recurrenceIndex:Number.isFinite(Number(b.recurrenceIndex))?Number(b.recurrenceIndex):0,recurrenceOverride:!!b.recurrenceOverride,auditLog:normaliseAuditLog(b.auditLog)};
+  return {...b,status:normaliseStatusName(b.status||'Booked'),jorb:!!b.jorb,confirmed:!!b.confirmed,confirmedAt:b.confirmedAt||'',confirmedBy:b.confirmedBy||'',canopyPkg:b.canopyPkg||'',vehicleMake,vehicleModel,vehicleYear,cabSize,cabSizeOther,vehicle,mountType:cleanVehiclePart(b.mountType||''),packageType:cleanVehiclePart(b.packageType||''),companionOption:cleanVehiclePart(b.companionOption||''),trayCanopyOption:cleanVehiclePart(b.trayCanopyOption||''),recurrenceGroupId:b.recurrenceGroupId||'',recurrenceParentId:b.recurrenceParentId||'',recurrenceRule:(b.recurrenceRule&&typeof b.recurrenceRule==='object')?b.recurrenceRule:null,recurrenceIndex:Number.isFinite(Number(b.recurrenceIndex))?Number(b.recurrenceIndex):0,recurrenceOverride:!!b.recurrenceOverride,auditLog:normaliseAuditLog(b.auditLog)};
 }
 function normaliseAuditLog(log){
   return Array.isArray(log) ? log.map(x=>({
@@ -9009,6 +9037,7 @@ function auditComparableBooking(b){
     fitType:b.type||'',
     slot:b.slotId||'',
     bookingType:normaliseStatusName(b.status||''),
+    jorb:b.jorb?'JorB':'',
     customer:b.customer||'',
     order:b.order||'',
     canopyPkg:b.canopyPkg||'',
@@ -9408,7 +9437,7 @@ function saveSettingsFieldsToActiveBranch(){
 }
 function bookingBranch(b){return (b&&b.branch)||'Brisbane';}
 function isCurrentBranchBooking(b){return bookingBranch(b)===activeBranch();}
-function selectBranch(branch){
+async function selectBranch(branch){
   if(!BRANCH_NAMES.includes(branch))return;
   if(!visibleBranchesForCurrentUser().includes(branch)){toast('Your user access does not include '+branch+'.');return;}
   saveSettingsFieldsToActiveBranch();
@@ -9417,6 +9446,10 @@ function selectBranch(branch){
   resetSearchMatches();
   jumpDateIso=null;
   applyBranchConfigToSettings();
+  if(supabaseClient && supabaseReady){
+    subscribeSupabaseState();
+    await loadSupabaseBookingRowsForCurrentWindow(true);
+  }
   render();
   toast(branch+' branch selected.');
 }
@@ -10205,7 +10238,7 @@ function defaultRoleKey(){const defs=getRoleDefs();return defs.workshop?'worksho
 function normaliseRole(role){const defs=getRoleDefs();return defs[role]?role:defaultRoleKey();}
 function currentRole(){const defs=getRoleDefs();const key=normaliseRole(auth.role);return {key,...defs[key]};}
 function roleLabel(){return currentRole().label;}
-function branchRestrictedAction(action){return ['createBooking','editBooking','deleteBooking','duplicateBooking','confirmBooking','updateWorkflow'].includes(action);}
+function branchRestrictedAction(action){return ['createBooking','editBooking','deleteBooking','duplicateBooking','confirmBooking','jorb','updateWorkflow'].includes(action);}
 function hasAuthority(action){
   const role=currentRole();
   if(!(role.actions||[]).includes(action))return false;
@@ -10214,6 +10247,32 @@ function hasAuthority(action){
   return true;
 }
 function requireAuthority(action,msg){if(hasAuthority(action))return true;toast(msg||('Your current access cannot perform this action.'));return false;}
+function setJorbButtonState(active){
+  modalJorbFlag=!!active;
+  const btn=$('jorbBookingBtn');
+  if(!btn)return;
+  btn.classList.toggle('on',modalJorbFlag);
+  btn.setAttribute('aria-pressed',modalJorbFlag?'true':'false');
+  btn.textContent=modalJorbFlag?'JorB ON':'JorB';
+}
+function toggleCurrentBookingJorb(){
+  if(!requireAuthority('jorb','Your current role cannot mark bookings as JorB.'))return;
+  const existing=editingId?bookingById(editingId):null;
+  const next=!modalJorbFlag;
+  setJorbButtonState(next);
+  if(existing){
+    const before=clone(existing);
+    existing.jorb=next;
+    existing.updatedAt=new Date().toISOString();
+    addBookingChangeAudit(existing,'JorB updated',before,existing,next?'JorB flag enabled.':'JorB flag cleared.');
+    queueBookingUpsert(existing,true);
+    render();
+    applyBookingModalAuthority(true);
+    toast(next?'JorB flag enabled.':'JorB flag cleared.');
+  }else{
+    toast(next?'JorB flag will be applied when saved.':'JorB flag cleared.');
+  }
+}
 function loadAuth(){auth={mode:'role',role:defaultRoleKey(),userId:'',userName:''};}
 function saveAuth(){try{localStorage.removeItem(AUTH_STORAGE_KEY);}catch(e){}}
 function renderAuthorityOptions(){
@@ -10378,6 +10437,9 @@ function applyBookingModalAuthority(isExisting){
   const existing=editingId?bookingById(editingId):null;
   const canConfirm=isExisting && existing && isConfirmableBooking(existing) && hasAuthority('confirmBooking');
   const alreadyConfirmed=!!(existing&&existing.confirmed);
+  const canUseJorb=hasAuthority('jorb') && (isExisting || mode==='edit');
+  setDisplay('jorbBookingBtn',canUseJorb);
+  if($('jorbBookingBtn'))$('jorbBookingBtn').disabled=!canUseJorb;
   setDisplay('auditBookingBtn',isExisting && hasAuthority('viewAudit'));
   setDisplay('deleteBookingBtn',isExisting && hasAuthority('deleteBooking'));
   setDisplay('duplicateBookingBtn',isExisting && hasAuthority('duplicateBooking'));
@@ -10685,14 +10747,129 @@ function bookingRowDeletedValue(row){
   const t=Date.parse((row&&row.deleted_at)||'');
   return Number.isFinite(t)?t:0;
 }
+function validBookingDateForSupabase(v){
+  const raw=String(v||'').trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(raw) ? raw : null;
+}
+function bookingSearchTextForSupabase(b){
+  if(!b)return '';
+  return [
+    b.customer,b.order,b.canopyPkg,b.vehicle,b.vehicleMake,b.vehicleModel,b.vehicleYear,
+    effectiveCabSize(b),b.cabSizeOther,b.regoStock,b.mountType,b.packageType,
+    b.companionOption,b.trayCanopyOption,b.details,b.assignedTo,b.partTime,b.type,normaliseStatusName(b.status),b.jorb?'JorB':''
+  ].map(v=>String(v||'').trim()).filter(Boolean).join(' ').toLowerCase();
+}
+function currentSupabaseBookingWindow(){
+  const branch=activeBranch();
+  const startBase=fromIso(state.weekStart||iso(startOfWeek(new Date())));
+  const visibleDays=Number(state.settings&&state.settings.visibleDays)||6;
+  const startIso=iso(addDays(startBase,-SUPABASE_BOOKING_LOAD_DAYS_BEFORE));
+  const endIso=iso(addDays(startBase,(visibleDays-1)+SUPABASE_BOOKING_LOAD_DAYS_AFTER));
+  return {branch,startIso,endIso,key:branch+'|'+startIso+'|'+endIso};
+}
+function supabaseRowIsInCurrentWindow(row){
+  const w=currentSupabaseBookingWindow();
+  const rowBranch=(row&&row.branch)||((row&&row.booking)?bookingBranch(row.booking):'');
+  const rowDate=validBookingDateForSupabase((row&&row.booking_date)||((row&&row.booking)?row.booking.date:''));
+  return rowBranch===w.branch && !!rowDate && rowDate>=w.startIso && rowDate<=w.endIso;
+}
+function mergeSupabaseBookingRowsForWindow(rows,windowInfo,replaceAll){
+  const incoming=Array.isArray(rows)?rows:[];
+  const incomingIds=new Set(incoming.map(row=>row&&row.id).filter(Boolean));
+  if(replaceAll){
+    state.bookings=[];
+    state.bookingDeletes={};
+  }else{
+    state.bookings=(Array.isArray(state.bookings)?state.bookings:[]).filter(b=>{
+      if(!b || !b.id)return false;
+      const d=validBookingDateForSupabase(b.date);
+      const inWindow=bookingBranch(b)===windowInfo.branch && !!d && d>=windowInfo.startIso && d<=windowInfo.endIso;
+      return !inWindow || incomingIds.has(b.id);
+    });
+  }
+  incoming.sort((a,b)=>bookingRowUpdatedValue(a)-bookingRowUpdatedValue(b)).forEach(row=>applySupabaseBookingRow(row));
+  state.bookings.sort((a,b)=>String(a.date||'').localeCompare(String(b.date||'')) || String(a.slotId||'').localeCompare(String(b.slotId||'')) || String(a.createdAt||'').localeCompare(String(b.createdAt||'')));
+  pruneBookingDeletes();
+  localStorage.setItem(STORAGE_KEY,JSON.stringify(state));
+}
+async function loadSupabaseBookingRowsForCurrentWindow(force,replaceAll){
+  if(!supabaseClient)return;
+  const windowInfo=currentSupabaseBookingWindow();
+  if(!force && supabaseLoadedBookingWindows[windowInfo.key])return;
+  if(supabaseBookingLoadInFlightKey===windowInfo.key)return;
+  supabaseBookingLoadInFlightKey=windowInfo.key;
+  supabaseHydratingBookingRows=true;
+  try{
+    const {data,error}=await supabaseClient
+      .from(SUPABASE_BOOKINGS_TABLE)
+      .select('id,booking,updated_at,branch,booking_date,booking_type,status')
+      .eq('branch',windowInfo.branch)
+      .gte('booking_date',windowInfo.startIso)
+      .lte('booking_date',windowInfo.endIso)
+      .is('deleted_at',null)
+      .order('booking_date',{ascending:true})
+      .limit(SUPABASE_BOOKING_WINDOW_LIMIT);
+    if(error){
+      supabaseBookingsTableAvailable=false;
+      console.error('Supabase booking window load failed',error);
+      toast('Supabase booking rows load failed. Check mrtbc_bookings columns/RLS.');
+      return;
+    }
+    supabaseBookingsTableAvailable=true;
+    supabaseLoadedBookingWindows[windowInfo.key]=true;
+    mergeSupabaseBookingRowsForWindow(Array.isArray(data)?data:[],windowInfo,!!replaceAll);
+  }finally{
+    supabaseHydratingBookingRows=false;
+    supabaseBookingLoadInFlightKey='';
+  }
+}
+function scheduleSupabaseVisibleBookingLoad(force){
+  if(!supabaseReady || !supabaseClient || supabaseHydratingBookingRows || !supabaseBookingsTableAvailable)return;
+  const windowInfo=currentSupabaseBookingWindow();
+  if(!force && supabaseLoadedBookingWindows[windowInfo.key])return;
+  clearTimeout(supabaseBookingLoadTimer);
+  supabaseBookingLoadTimer=setTimeout(async()=>{
+    await loadSupabaseBookingRowsForCurrentWindow(!!force,false);
+    render();
+  },80);
+}
+async function deepSearchSupabaseBookings(q){
+  const term=String(q||'').trim().toLowerCase();
+  if(!supabaseClient || !term)return [];
+  try{
+    const {data,error}=await supabaseClient
+      .from(SUPABASE_BOOKINGS_TABLE)
+      .select('id,booking,updated_at,branch,booking_date,booking_type,status')
+      .eq('branch',activeBranch())
+      .is('deleted_at',null)
+      .ilike('search_text','%'+term.replace(/[%_]/g,'\\$&')+'%')
+      .order('booking_date',{ascending:false})
+      .limit(50);
+    if(error){console.error('Supabase deep booking search failed',error);return [];}
+    (Array.isArray(data)?data:[]).forEach(row=>applySupabaseBookingRow(row));
+    state.bookings.sort((a,b)=>String(a.date||'').localeCompare(String(b.date||'')) || String(a.slotId||'').localeCompare(String(b.slotId||'')) || String(a.createdAt||'').localeCompare(String(b.createdAt||'')));
+    localStorage.setItem(STORAGE_KEY,JSON.stringify(state));
+    return getGlobalSearchMatches();
+  }catch(e){
+    console.error('Supabase deep booking search failed',e);
+    return [];
+  }
+}
 function bookingRowPayloadForUpsert(b){
   if(!b || !b.id)return null;
   const booking=normaliseBookingRecord(clone(b));
   const updatedAt=booking.updatedAt||new Date().toISOString();
   booking.updatedAt=updatedAt;
+  const branch=bookingBranch(booking);
+  const bookingDate=validBookingDateForSupabase(booking.date);
   return {
     id:booking.id,
     booking:booking,
+    branch:branch,
+    booking_date:bookingDate,
+    booking_type:booking.type||'',
+    status:normaliseStatusName(booking.status),
+    search_text:bookingSearchTextForSupabase(booking),
     updated_at:updatedAt,
     deleted_at:null,
     updated_by:typeof auditActor==='function' ? auditActor() : (typeof roleLabel==='function' ? roleLabel() : 'Unknown')
@@ -10767,37 +10944,44 @@ async function flushSupabaseBookingChanges(){
   if(supabaseBookingFlushInFlight || supabaseApplyingRemote)return false;
   if(!supabaseReady || !supabaseClient || !supabaseBookingsTableAvailable)return false;
 
-  let upserts=Object.values(supabasePendingBookingUpserts||{}).filter(Boolean);
+  const upserts=Object.values(supabasePendingBookingUpserts||{}).filter(Boolean);
   const deletes={...(supabasePendingBookingDeletes||{})};
-  if(!upserts.length && !Object.keys(deletes).length)return true;
+  const deleteIds=Object.keys(deletes).filter(Boolean);
+  if(!upserts.length && !deleteIds.length)return true;
 
   supabasePendingBookingUpserts={};
   supabasePendingBookingDeletes={};
   supabaseBookingFlushInFlight=true;
 
   try{
-    upserts=await removeLocallyDeletedRemoteUpserts(upserts);
     const upsertRows=upserts.map(bookingRowPayloadForUpsert).filter(Boolean);
-    const deleteRows=Object.keys(deletes).map(id=>bookingRowPayloadForDelete(id,deletes[id])).filter(Boolean);
 
     if(upsertRows.length){
       const {error}=await supabaseClient
         .from(SUPABASE_BOOKINGS_TABLE)
         .upsert(upsertRows,{onConflict:'id'});
       if(error)throw error;
+      upsertRows.forEach(row=>{
+        const d=validBookingDateForSupabase(row.booking_date);
+        if(row.branch && d){
+          // A saved booking should be visible immediately even before Realtime returns it.
+          applySupabaseBookingRow(row);
+        }
+      });
     }
-    if(deleteRows.length){
+    if(deleteIds.length){
       const {error}=await supabaseClient
         .from(SUPABASE_BOOKINGS_TABLE)
-        .upsert(deleteRows,{onConflict:'id'});
+        .delete()
+        .in('id',deleteIds);
       if(error)throw error;
     }
     return true;
   }catch(err){
     console.error('Supabase booking row save failed',err);
     supabaseBookingsTableAvailable=false;
-    Object.values(upserts||{}).forEach(b=>{if(b&&b.id)supabasePendingBookingUpserts[b.id]=b;});
-    Object.keys(deletes||{}).forEach(id=>{supabasePendingBookingDeletes[id]=deletes[id];});
+    upserts.forEach(b=>{if(b&&b.id)supabasePendingBookingUpserts[b.id]=b;});
+    deleteIds.forEach(id=>{supabasePendingBookingDeletes[id]=deletes[id];});
     toast('Supabase booking row save failed. Check mrtbc_bookings table/RLS.');
     return false;
   }finally{
@@ -10809,9 +10993,9 @@ async function flushSupabaseBookingChanges(){
 }
 function sendSupabaseBookingKeepalive(){
   if(!SUPABASE_SYNC_ENABLED || !hasSupabaseConfig() || typeof fetch!=='function')return;
-  const upserts=Object.values(supabasePendingBookingUpserts||{}).filter(Boolean).map(bookingRowPayloadForUpsert).filter(Boolean);
-  const deletes=Object.keys(supabasePendingBookingDeletes||{}).map(id=>bookingRowPayloadForDelete(id,supabasePendingBookingDeletes[id])).filter(Boolean);
-  const rows=upserts.concat(deletes);
+  // Keepalive is only used for pending upserts. Deletes are normally flushed immediately
+  // with .delete().in('id', ids), which avoids re-creating soft-deleted rows.
+  const rows=Object.values(supabasePendingBookingUpserts||{}).filter(Boolean).map(bookingRowPayloadForUpsert).filter(Boolean);
   if(!rows.length)return;
   try{
     fetch(supabaseBookingsRestUrl(),{
@@ -10855,60 +11039,30 @@ function applySupabaseBookingRow(row){
   return false;
 }
 function applySupabaseBookingRows(rows){
-  state.bookings=[];
-  state.bookingDeletes={};
-  (Array.isArray(rows)?rows:[]).sort((a,b)=>bookingRowUpdatedValue(a)-bookingRowUpdatedValue(b)).forEach(row=>applySupabaseBookingRow(row));
-  state.bookings.sort((a,b)=>String(a.date||'').localeCompare(String(b.date||'')) || String(a.slotId||'').localeCompare(String(b.slotId||'')) || String(a.createdAt||'').localeCompare(String(b.createdAt||'')));
-  pruneBookingDeletes();
-  localStorage.setItem(STORAGE_KEY,JSON.stringify(state));
+  const windowInfo=currentSupabaseBookingWindow();
+  mergeSupabaseBookingRowsForWindow(rows,windowInfo,true);
 }
 async function loadSupabaseBookingRowsOnce(legacyState){
   if(!supabaseClient)return;
-  supabaseHydratingBookingRows=true;
-  try{
-    const {data,error}=await supabaseClient
-      .from(SUPABASE_BOOKINGS_TABLE)
-      .select('id,booking,updated_at,deleted_at')
-      .order('updated_at',{ascending:true})
-      .limit(SUPABASE_BOOKINGS_LIMIT);
-    if(error){
-      supabaseBookingsTableAvailable=false;
-      console.error('Supabase booking rows load failed',error);
-      toast('Supabase booking rows table missing or blocked. Create mrtbc_bookings before using this version.');
-      return;
-    }
-    supabaseBookingsTableAvailable=true;
-    const rows=Array.isArray(data)?data:[];
-    if(rows.length){
-      applySupabaseBookingRows(rows);
-      return;
-    }
+  await loadSupabaseBookingRowsForCurrentWindow(true,true);
 
-    // First-run migration: when the new booking table is empty, copy active bookings
-    // from the old shared state row once. This avoids using stale localStorage as
-    // the source of truth during migration.
-    const legacyBookings=Array.isArray(legacyState&&legacyState.bookings)?legacyState.bookings:[];
-    if(legacyBookings.length){
-      const merged=mergeSharedBookingData({bookings:[],bookingDeletes:{}},legacyState||{});
-      state.bookings=merged.bookings;
-      state.bookingDeletes=merged.bookingDeletes;
-      pruneBookingDeletes();
-      localStorage.setItem(STORAGE_KEY,JSON.stringify(state));
-      // Allow the first-run migration to create booking rows even though this
-      // function is otherwise in hydration mode.
-      supabaseHydratingBookingRows=false;
-      queueBookingUpserts(state.bookings,false);
-      await flushSupabaseBookingChanges();
-      supabaseHydratingBookingRows=true;
-      toast('Migrated '+state.bookings.length+' booking(s) into row-based Supabase sync.');
-      return;
-    }
+  // The legacy all-bookings migration is now deliberately disabled.
+  // With scoped loading, an empty current branch/week window is normal and should not
+  // trigger a full historical migration from the old shared state row.
+  if(!SUPABASE_ENABLE_LEGACY_BOOKING_MIGRATION)return;
 
-    state.bookings=[];
-    state.bookingDeletes={};
+  const legacyBookings=Array.isArray(legacyState&&legacyState.bookings)?legacyState.bookings:[];
+  if(legacyBookings.length && !state.bookings.length){
+    const merged=mergeSharedBookingData({bookings:[],bookingDeletes:{}},legacyState||{});
+    state.bookings=merged.bookings;
+    state.bookingDeletes=merged.bookingDeletes;
+    pruneBookingDeletes();
     localStorage.setItem(STORAGE_KEY,JSON.stringify(state));
-  }finally{
     supabaseHydratingBookingRows=false;
+    queueBookingUpserts(state.bookings,false);
+    await flushSupabaseBookingChanges();
+    supabaseHydratingBookingRows=true;
+    toast('Migrated '+state.bookings.length+' booking(s) into row-based Supabase sync.');
   }
 }
 
@@ -11061,7 +11215,8 @@ function subscribeSupabaseState(){
     .on('postgres_changes',{
       event:'*',
       schema:'public',
-      table:SUPABASE_BOOKINGS_TABLE
+      table:SUPABASE_BOOKINGS_TABLE,
+      filter:'branch=eq.'+activeBranch()
     },payload=>{
       if(!payload)return;
       supabaseApplyingRemote=true;
@@ -11070,11 +11225,12 @@ function subscribeSupabaseState(){
         const id=(payload.old&&payload.old.id)||'';
         if(id){
           state.bookings=state.bookings.filter(b=>b&&b.id!==id);
-          markBookingDeleted(id,new Date().toISOString());
+          delete state.bookingDeletes[id];
           changed=true;
         }
       }else{
-        changed=applySupabaseBookingRow(payload.new||{});
+        const row=payload.new||{};
+        if(supabaseRowIsInCurrentWindow(row))changed=applySupabaseBookingRow(row);
       }
       if(changed){
         pruneBookingDeletes();
@@ -11173,7 +11329,7 @@ function isAssignedFieldVisibleForType(type){
 function bookingsForSlot(slot){return state.bookings.filter(b=>isCurrentBranchBooking(b) && b.date===slot.id.split('|')[0] && b.slotId===slot.id);}
 function bookingById(id){return state.bookings.find(b=>b.id===id);}
 
-function render(){ensureActiveBranchAllowed();applyBranchConfigToSettings();ensureProgrammedPublicHolidaysForVisibleWeek();applyDynamicColours();renderHeader();renderCalendar();renderSummary();renderSummarySheetVisibility();applyAuthorityUI();save();}
+function render(){ensureActiveBranchAllowed();applyBranchConfigToSettings();ensureProgrammedPublicHolidaysForVisibleWeek();applyDynamicColours();renderHeader();renderCalendar();renderSummary();renderSummarySheetVisibility();applyAuthorityUI();save();scheduleSupabaseVisibleBookingLoad(false);}
 function renderHeader(){
   const start=fromIso(state.weekStart); const end=addDays(start,(Number(state.settings.visibleDays)||6)-1);
   $('weekLabel').textContent = fmtShort(start)+' - '+fmtShort(end)+' '+end.getFullYear();
@@ -11372,10 +11528,26 @@ function applyCustomStatusColours(card,b){
  badge.style.setProperty('color',pillTxt,'important');
  }
 }
+function applyJorbCardStyle(card,b){
+  if(!card || !(b&&b.jorb))return;
+  const order=card.querySelector('.booking-order-link,.booking-order');
+  if(order){
+    order.style.setProperty('display','inline-block','important');
+    order.style.setProperty('color','#ffffff','important');
+    order.style.setProperty('border','none','important');
+    order.style.setProperty('border-radius','4px','important');
+    order.style.setProperty('padding','1px 5px','important');
+    order.style.setProperty('background','#d00000','important');
+    order.style.setProperty('text-shadow','none','important');
+    order.style.setProperty('-webkit-text-stroke','0');
+    order.style.setProperty('text-decoration','none','important');
+    order.title='JorB';
+  }
+}
 function renderBookingCard(b){
   const div=document.createElement('div');
   const displayB=bookingWithContinuationDetails(b);
-  div.className='booking'+bookingVisualClass(b)+(b&&b.confirmed?' booking-confirmed':'')+(highlightedBookingId===b.id?' search-hit':'');
+  div.className='booking'+bookingVisualClass(b)+(b&&b.confirmed?' booking-confirmed':'')+(b&&b.jorb?' jorb-flag':'')+(highlightedBookingId===b.id?' search-hit':'');
   div.dataset.bookingId=b.id;
   const customer=(displayB&&displayB.customer||'').trim();
   const rawOrder=(displayB&&displayB.order||'').trim();
@@ -11400,7 +11572,7 @@ function renderBookingCard(b){
   if(vehicleLabel)meta.push(esc(vehicleLabel));
   if(displayB.regoStock)meta.push('Rego/Stock: '+esc(displayB.regoStock));
   if(displayB.details)meta.push(esc(displayB.details));
-  div.innerHTML='<div class="booking-head"><div class="booking-cust">'+titleHtml+'</div><div class="booking-status '+(isCollectedBooking(b)?'completed':'')+'">'+esc(displayStatus)+'</div></div><div class="booking-meta">'+meta.join('<span class="booking-meta-sep"> | </span>')+'</div>';
+  div.innerHTML='<div class="booking-head"><div class="booking-cust">'+titleHtml+'</div><div class="booking-status '+(isCollectedBooking(b)?'completed':'')+'">'+esc(displayStatus)+'</div></div><div class="booking-meta">'+meta.join(' || ')+'</div>';
   const orderBtn=div.querySelector('.booking-order-link');
   if(orderBtn){
     orderBtn.addEventListener('click',ev=>{
@@ -11409,6 +11581,7 @@ function renderBookingCard(b){
     });
   }
   applyCustomStatusColours(div,b);
+  applyJorbCardStyle(div,b);
   if(!isNonWorkflowBooking(b)){
     const row=document.createElement('div'); row.className='status-row';
     workflowActions().filter(action=>shouldShowWorkflowActionForBookingType(b.type,action)).forEach(action=>{
@@ -12023,13 +12196,17 @@ function closestSearchMatchIndex(matches){
 function showSearchPositionToast(){
   if(searchMatchIds.length>1 && searchMatchIndex>=0)toast('Search result '+(searchMatchIndex+1)+' of '+searchMatchIds.length+'.');
 }
-function runGlobalSearch(forceNext){
+async function runGlobalSearch(forceNext){
   const q=$('searchInput').value.trim().toLowerCase();
   if(!q){
     toast('Enter a search term first.');
     return;
   }
-  const matches=getGlobalSearchMatches();
+  let matches=getGlobalSearchMatches();
+  if(!matches.length && supabaseClient){
+    toast('Searching older bookings...');
+    matches=await deepSearchSupabaseBookings(q);
+  }
   if(!matches.length){
     highlightedBookingId=null;
     resetSearchMatches();
@@ -12098,11 +12275,12 @@ function shiftDatePickerMonth(delta){
   datePickerMonth=new Date(base.getFullYear(),base.getMonth()+delta,1);
   renderDateJumpPicker(jumpDateIso);
 }
-function jumpToDate(dateIso){
+async function jumpToDate(dateIso){
   if(!dateIso)return;
   jumpDateIso=dateIso;
   highlightedBookingId=null;
   state.weekStart=iso(startOfWeek(fromIso(dateIso)));
+  if(supabaseClient && supabaseReady)await loadSupabaseBookingRowsForCurrentWindow(false,false);
   render();
   setTimeout(()=>{
     const el=document.querySelector('[data-date-iso="'+dateIso+'"]');
@@ -12194,7 +12372,8 @@ function openBooking(id,data){
   duplicateTargetDirty=false;
   populateBookingDropdowns();
   const b=id?bookingById(id):null;
-  const base=normaliseBookingRecord(b||{date:(data&&data.date)||state.weekStart,type:(data&&data.type)||'Part Day',slotId:(data&&data.slotId)||'',status:(data&&data.status)||'Booked',customer:(data&&data.customer)||'',order:(data&&data.order)||'',canopyPkg:(data&&data.canopyPkg)||'',vehicle:(data&&data.vehicle)||'',vehicleMake:(data&&data.vehicleMake)||'',vehicleModel:(data&&data.vehicleModel)||'',vehicleYear:(data&&data.vehicleYear)||'',cabSize:(data&&data.cabSize)||'',cabSizeOther:(data&&data.cabSizeOther)||'',regoStock:(data&&data.regoStock)||'',assignedTo:(data&&data.assignedTo)||'',details:(data&&data.details)||'',mountType:(data&&data.mountType)||'',packageType:(data&&data.packageType)||'',companionOption:(data&&data.companionOption)||'',trayCanopyOption:(data&&data.trayCanopyOption)||'',partTime:(data&&data.partTime)||normalisePartTimeValue('',(data&&data.slotId)||''),prepRequired:(data&&data.prepRequired)||false,jobPrepped:(data&&data.jobPrepped)||false,onSite:(data&&data.onSite)||false,fitComplete:(data&&data.fitComplete)||false,collected:(data&&data.collected)||false,workflowStates:(data&&data.workflowStates)||{},confirmed:(data&&data.confirmed)||false,confirmedAt:(data&&data.confirmedAt)||'',confirmedBy:(data&&data.confirmedBy)||''});
+  const base=normaliseBookingRecord(b||{date:(data&&data.date)||state.weekStart,type:(data&&data.type)||'Part Day',slotId:(data&&data.slotId)||'',status:(data&&data.status)||'Booked',customer:(data&&data.customer)||'',order:(data&&data.order)||'',canopyPkg:(data&&data.canopyPkg)||'',vehicle:(data&&data.vehicle)||'',vehicleMake:(data&&data.vehicleMake)||'',vehicleModel:(data&&data.vehicleModel)||'',vehicleYear:(data&&data.vehicleYear)||'',cabSize:(data&&data.cabSize)||'',cabSizeOther:(data&&data.cabSizeOther)||'',regoStock:(data&&data.regoStock)||'',assignedTo:(data&&data.assignedTo)||'',details:(data&&data.details)||'',mountType:(data&&data.mountType)||'',packageType:(data&&data.packageType)||'',companionOption:(data&&data.companionOption)||'',trayCanopyOption:(data&&data.trayCanopyOption)||'',partTime:(data&&data.partTime)||normalisePartTimeValue('',(data&&data.slotId)||''),prepRequired:(data&&data.prepRequired)||false,jobPrepped:(data&&data.jobPrepped)||false,onSite:(data&&data.onSite)||false,fitComplete:(data&&data.fitComplete)||false,collected:(data&&data.collected)||false,workflowStates:(data&&data.workflowStates)||{},jorb:(data&&data.jorb)||false,confirmed:(data&&data.confirmed)||false,confirmedAt:(data&&data.confirmedAt)||'',confirmedBy:(data&&data.confirmedBy)||''});
+  setJorbButtonState(!!base.jorb);
   $('bookingModalTitle').textContent=isDuplicateMode?'Duplicate Booking - Choose Date & Bay':(id?'Edit Booking':'New Booking'); $('deleteBookingBtn').style.display=id?'inline-block':'none'; $('duplicateBookingBtn').style.display=id?'inline-block':'none';
   $('bDate').value=base.date; $('bType').value=base.type; populateSlotsForDate(base.date,base.slotId,base.type); $('bStatus').value=normaliseStatusName(base.status);
   const selectedPartTime=normalisePartTimeValue(base.partTime,base.slotId);
@@ -12448,6 +12627,7 @@ function readBookingForm(existing){
     id: existing?existing.id:uid(), branch: existing?bookingBranch(existing):activeBranch(), date, type:$('bType').value, slotId:$('bSlot').value, status:normaliseStatusName($('bStatus').value),
     customer:$('bCustomer').value.trim(), order:$('bOrder').value.trim(), canopyPkg:$('bCanopyPkg').value.trim(), vehicleMake:$('bVehicleMake').value.trim(), vehicleModel:$('bVehicleModel').value.trim(), vehicleYear:$('bVehicleYear').value.trim(), cabSize:$('bCabSize').value.trim(), cabSizeOther:$('bCabSizeOther').value.trim(), vehicle:'', regoStock:$('bRegoStock').value.trim(), assignedTo:isAssignedFieldVisibleForType($('bType').value) ? $('bAssigned').value.trim() : (slot?slot.assigned:''), mountType:isFitDetailType($('bType').value) ? $('bMountType').value.trim() : '', packageType:isFitDetailType($('bType').value) ? $('bPackageType').value.trim() : '', companionOption:(isFitDetailType($('bType').value) && $('bMountType').value==='Chassis Mount' && $('bPackageType').value==='Companion') ? $('bCompanionOption').value.trim() : '', trayCanopyOption:(isFitDetailType($('bType').value) && $('bMountType').value==='Tray & Canopy') ? $('bTrayCanopyOption').value.trim() : '', details:$('bDetails').value.trim(), partTime:$('bType').value==='Part Day' ? $('bPartTime').value : '',
     prepRequired:false, jobPrepped:false, onSite:false, fitComplete:false, collected:false, workflowStates:{},
+    jorb:!!modalJorbFlag,
     confirmed:existing?!!existing.confirmed:false, confirmedAt:existing?(existing.confirmedAt||''):'', confirmedBy:existing?(existing.confirmedBy||''):'',
     createdAt: existing?existing.createdAt:new Date().toISOString(), updatedAt:new Date().toISOString()
   };
@@ -12617,7 +12797,7 @@ async function copyCustomerEmailText(){
   }
 }
 
-function closeBooking(){editingId=null;prefill=null;duplicateSourceBooking=null;duplicateTargetDirty=false;$('bookingModal').classList.remove('open');}
+function closeBooking(){editingId=null;modalJorbFlag=false;prefill=null;duplicateSourceBooking=null;duplicateTargetDirty=false;$('bookingModal').classList.remove('open');}
 function deleteBooking(){if(!editingId)return; if(!requireAuthority('deleteBooking','Your current role cannot delete bookings.'))return; const existing=bookingById(editingId); const msg=existing&&existing.recurrenceGroupId?'Delete this occurrence only? Other repeated bookings will stay unchanged.':'Delete this booking?'; if(confirm(msg)){markBookingDeleted(editingId);state.bookings=state.bookings.filter(b=>b.id!==editingId);closeBooking();render();toast(existing&&existing.recurrenceGroupId?'Repeated occurrence deleted.':'Booking deleted');}}
 function duplicateBooking(){
   if(!requireAuthority('duplicateBooking','Your current role cannot duplicate bookings.'))return;
@@ -12799,7 +12979,7 @@ function bind(){
   document.addEventListener('click',e=>{if(!shouldKeepSearchFromClick(e.target))clearSearchState();});
   $('searchBtn').addEventListener('click',()=>runGlobalSearch(false));
   if($('searchNextBtn'))$('searchNextBtn').addEventListener('click',()=>runGlobalSearch(true));
-  $('closeBookingBtn').addEventListener('click',closeBooking); $('saveBookingBtn').addEventListener('click',saveBooking); $('confirmBookingBtn').addEventListener('click',confirmCurrentBooking); $('deleteBookingBtn').addEventListener('click',deleteBooking); $('duplicateBookingBtn').addEventListener('click',duplicateBooking);
+  $('closeBookingBtn').addEventListener('click',closeBooking); $('saveBookingBtn').addEventListener('click',saveBooking); if($('jorbBookingBtn'))$('jorbBookingBtn').addEventListener('click',toggleCurrentBookingJorb); $('confirmBookingBtn').addEventListener('click',confirmCurrentBooking); $('deleteBookingBtn').addEventListener('click',deleteBooking); $('duplicateBookingBtn').addEventListener('click',duplicateBooking);
   if($('generateEmailBtn'))$('generateEmailBtn').addEventListener('click',openCustomerEmailModal);
   if($('closeCustomerEmailBtn'))$('closeCustomerEmailBtn').addEventListener('click',closeCustomerEmailModal);
   if($('selectCustomerEmailBtn'))$('selectCustomerEmailBtn').addEventListener('click',selectCustomerEmailText);
