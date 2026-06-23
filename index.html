@@ -13,6 +13,7 @@
 <!-- MRTBC update: Full Day assigned field hidden; custom/overnight cards force readable title/order/canopy details and can fill missing display fields from the previous day same bay. -->
 <!-- MRTBC update: Booking confirmation permission and green confirmed booked pill added. -->
 <!-- MRTBC fix: Restored Duplicate button and opens PIN prompt immediately while Supabase sync continues. -->
+<!-- MRTBC fix: Card workflow chips now persist to row-based Supabase bookings. -->
 
 <!-- Cleaned version: duplicate IDs fixed, stale filters removed, CSS root/declaration overlap reduced. -->
 <style>/*
@@ -11388,7 +11389,7 @@ function renderBookingCard(b){
   if(vehicleLabel)meta.push(esc(vehicleLabel));
   if(displayB.regoStock)meta.push('Rego/Stock: '+esc(displayB.regoStock));
   if(displayB.details)meta.push(esc(displayB.details));
-  div.innerHTML='<div class="booking-head"><div class="booking-cust">'+titleHtml+'</div><div class="booking-status '+(isCollectedBooking(b)?'completed':'')+'">'+esc(displayStatus)+'</div></div><div class="booking-meta">'+meta.join(' | ')+'</div>';
+  div.innerHTML='<div class="booking-head"><div class="booking-cust">'+titleHtml+'</div><div class="booking-status '+(isCollectedBooking(b)?'completed':'')+'">'+esc(displayStatus)+'</div></div><div class="booking-meta">'+meta.join(' || ')+'</div>';
   const orderBtn=div.querySelector('.booking-order-link');
   if(orderBtn){
     orderBtn.addEventListener('click',ev=>{
@@ -11427,10 +11428,20 @@ function toggleBookingWorkflow(b,key){
   b.updatedAt=new Date().toISOString();
   addBookingChangeAudit(b,'Workflow updated',before,b,bookingActionLabel(action)+' '+(next?'selected':'cleared'));
 
-  // Persist direct card workflow-chip changes immediately.
-  // Without this, the chip updates only in the current browser memory and reverts after refresh.
+  // Row-sync fix: card chip clicks were only updating browser memory.
+  // Persist the updated workflowStates/legacy flags to the mrtbc_bookings row.
   try{localStorage.setItem(STORAGE_KEY,JSON.stringify(state));}catch(e){}
-  queueBookingUpsert(b,true);
+  try{
+    queueBookingUpsert(b,true);
+    // Safety retry: if another booking row flush is already in-flight, the immediate flush can be skipped.
+    // This delayed flush makes sure the pending workflow update is pushed after the current save finishes.
+    setTimeout(()=>{
+      try{
+        const res=flushSupabaseBookingChanges();
+        if(res&&typeof res.catch==='function')res.catch(err=>console.warn('Workflow status retry save failed',err));
+      }catch(err){console.warn('Workflow status retry save failed',err);}
+    },350);
+  }catch(e){console.warn('Workflow status save queue failed',e);}
 
   render();
   toast('Workflow status saved.');
