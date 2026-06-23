@@ -3234,6 +3234,11 @@ select option:hover,
   font-weight:950!important;
 }
 
+/* Change | colour */
+.booking .booking-meta .booking-meta-sep{
+  color:#f50606!important;
+  font-weight:900!important;
+}
 
 /* Part Day time dropdown - unavailable 2-hour-gap times */
 #bPartTime option.part-time-unavailable,
@@ -11389,7 +11394,7 @@ function renderBookingCard(b){
   if(vehicleLabel)meta.push(esc(vehicleLabel));
   if(displayB.regoStock)meta.push('Rego/Stock: '+esc(displayB.regoStock));
   if(displayB.details)meta.push(esc(displayB.details));
-  div.innerHTML='<div class="booking-head"><div class="booking-cust">'+titleHtml+'</div><div class="booking-status '+(isCollectedBooking(b)?'completed':'')+'">'+esc(displayStatus)+'</div></div><div class="booking-meta">'+meta.join(' || ')+'</div>';
+  div.innerHTML='<div class="booking-head"><div class="booking-cust">'+titleHtml+'</div><div class="booking-status '+(isCollectedBooking(b)?'completed':'')+'">'+esc(displayStatus)+'</div></div><div class="booking-meta">'+meta.join('<span class="booking-meta-sep"> | </span>')+'</div>';
   const orderBtn=div.querySelector('.booking-order-link');
   if(orderBtn){
     orderBtn.addEventListener('click',ev=>{
